@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SHP/KML/CSV 转 GeoJSON 工具</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗺</text></svg>">
+<script src="https://fastly.jsdelivr.net/npm/shapefile@0.6/dist/shapefile.min.js"></script>
+<script src="https://fastly.jsdelivr.net/npm/proj4@2.11.0/dist/proj4.js"></script>
+<script src="https://fastly.jsdelivr.net/npm/@turf/turf@7/turf.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font-family: "Microsoft YaHei", "微软雅黑", "等线", sans-serif;
+    background: #f5f7fa;
+    color: #333;
+    display: flex;
+    flex-direction: column;
+  }
+  .header {
+    background: #fff;
+    border-bottom: 1px solid #e4e7ed;
+    padding: 10px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .header h1 { font-size: 16px; font-weight: 600; color: #2F6FB5; }
+  .header .sub { font-size: 12px; color: #909399; }
+
+  .container {
+    flex: 1;
+    min-height: 0;
+    max-width: 1280px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 12px 24px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .notice {
+    background: #fff7e6;
+    border: 1px solid #ffd591;
+    border-radius: 6px;
+    padding: 7px 12px;
+    margin-bottom: 10px;
+    font-size: 12px;
+    color: #ad6800;
+    flex-shrink: 0;
+  }
+
+  .main-grid {
+    display: grid;
+    grid-template-columns: 1.15fr 1fr;
+    gap: 14px;
+    align-items: start;
+  }
+
+  /* 左栏：drop zone + 文件列表 */
+  .left-col { display: flex; flex-direction: column; min-height: 0; gap: 10px; }
+  .drop-zone {
+    border: 2px dashed #c0c4cc;
+    border-radius: 8px;
+    background: #fff;
+    padding: 22px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: all .2s;
+    flex-shrink: 0;
+  }
+  .drop-zone:hover, .drop-zone.dragover { border-color: #2F6FB5; background: #ecf3fb; }
+  .drop-zone .icon { font-size: 28px; margin-bottom: 6px; }
+  .drop-zone p { font-size: 14px; color: #606266; margin-bottom: 3px; }
+  .drop-zone .hint { font-size: 11px; color: #909399; }
+  #fileInput { display: none; }
+
+  .file-list {
+    background: #fff;
+    border-radius: 8px;
+    border: 1px solid #e4e7ed;
+    display: flex;
+    flex-direction: column;
+  }
+  .file-list-title {
+    padding: 9px 14px;
+    border-bottom: 1px solid #ebeef5;
+    font-size: 13px;
+    font-weight: 600;
+    color: #303133;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  #fileItems { overflow-y: auto; min-height: 0; max-height: 380px; }
+  .file-item {
+    padding: 8px 14px;
+    border-bottom: 1px solid #f0f2f5;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+  }
+  .file-item:last-child { border-bottom: none; }
+  .color-dot {
+    width: 12px; height: 12px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    border: 1px solid rgba(0,0,0,.1);
+  }
+  .file-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #303133;
+  }
+  .file-status { font-size: 11px; padding: 2px 7px; border-radius: 4px; flex-shrink: 0; }
+  .status-pending { background: #f4f4f5; color: #909399; }
+  .status-ok { background: #f0f9eb; color: #67c23a; }
+  .status-err { background: #fef0f0; color: #f56c6c; }
+  .empty-tip { padding: 24px; text-align: center; color: #c0c4cc; font-size: 12px; }
+
+  /* 右栏：选项 + 操作 */
+  .options {
+    background: #fff;
+    border-radius: 8px;
+    border: 1px solid #e4e7ed;
+    padding: 14px 16px;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-self: start;
+  }
+  .options h3 { font-size: 13px; color: #303133; margin-bottom: 10px; }
+  .opt-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    color: #606266;
+  }
+  .opt-row input[type=checkbox] { accent-color: #2F6FB5; }
+  .opt-row select {
+    padding: 2px 6px;
+    border: 1px solid #dcdfe6;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .compress-panel {
+    margin-left: 18px;
+    padding: 8px 10px;
+    background: #f8f9fb;
+    border-radius: 6px;
+  }
+
+  /* 右栏底部：按钮+进度+日志 */
+  .action-wrap { margin-top: 14px; padding-top: 12px; border-top: 1px solid #f0f2f5; flex-shrink: 0; }
+  .convert-btn {
+    width: 100%;
+    padding: 10px;
+    background: #2F6FB5;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .2s;
+  }
+  .convert-btn:hover { background: #255a94; }
+  .convert-btn:disabled { background: #a0c4e8; cursor: not-allowed; }
+  .progress-bar {
+    margin-top: 10px;
+    height: 5px;
+    background: #ebeef5;
+    border-radius: 3px;
+    overflow: hidden;
+    display: none;
+  }
+  .progress-bar .fill { height: 100%; background: #2F6FB5; width: 0%; transition: width .3s; }
+  .log-area {
+    margin-top: 10px;
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-family: Consolas, monospace;
+    font-size: 11px;
+    max-height: 120px;
+    overflow-y: auto;
+    display: none;
+  }
+  .log-area p { margin-bottom: 2px; }
+  .log-ok { color: #67c23a; }
+  .log-err { color: #f56c6c; }
+  .log-info { color: #909399; }
+
+  @media (max-width: 900px) {
+    .main-grid { grid-template-columns: 1fr; }
+    html, body { overflow: auto; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>SHP → GeoJSON 转换工具</h1>
+  <span class="sub">批量矢量数据格式转换 · 自动分配填充色</span>
+</div>
+
+<div class="container">
+  <div class="notice">
+    注意：SHP 格式必须连同 .prj 文件一起导入，否则无法转换坐标系；KML / CSV / TXT 不需要
+  </div>
+
+  <div class="main-grid">
+    <!-- 左栏：拖拽 + 文件列表 -->
+    <div class="left-col">
+      <div class="drop-zone" id="dropZone">
+        <div class="icon">📁</div>
+        <p>点击选择或拖拽文件到这里</p>
+        <p class="hint">支持 .shp 配套文件、.kml、.csv/.txt（含经纬度列），自动识别分组</p>
+      </div>
+      <input type="file" id="fileInput" multiple>
+
+      <div class="file-list" id="fileList">
+        <div class="file-list-title">
+          <span id="fileListTitle">已选图层</span>
+          <span id="fileCount" style="font-weight:400"></span>
+        </div>
+        <div id="fileItems">
+          <div class="empty-tip">还没有选择文件，点击上方区域选择</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 右栏：选项 -->
+    <div class="options">
+      <h3>转换选项</h3>
+      <div class="opt-row">
+        <input type="checkbox" id="optWgs84" checked>
+        <label for="optWgs84">自动转换为 WGS84 (EPSG:4326) 坐标系</label>
+      </div>
+      <div class="opt-row">
+        <input type="checkbox" id="optColor" checked>
+        <label for="optColor">每个图层自动分配不同填充色（写入 fill_color 字段）</label>
+      </div>
+      <div class="opt-row">
+        <label>CSV/TXT坐标：</label>
+        <select id="csvCrs">
+          <option value="wgs84" selected>WGS84经纬度</option>
+          <option value="gauss">高斯投影坐标（自动识别带号）</option>
+        </select>
+        <span id="zoneWrap" style="display:none; font-size:11px; color:#888;">自动识别中...</span>
+      </div>
+      <div class="opt-row">
+        <input type="checkbox" id="optCompress" checked>
+        <label for="optCompress"><b>启用压缩</b></label>
+      </div>
+      <div class="compress-panel" id="compressPanel" style="display:block;">
+        <div class="opt-row">
+          <input type="checkbox" id="optSimplify" checked>
+          <label for="optSimplify">几何简化（Douglas-Peucker，去除冗余节点）</label>
+        </div>
+        <div class="opt-row" id="toleranceRow" style="display:flex; margin-left:16px;">
+          <label>简化程度：</label>
+          <select id="optTolerance">
+            <option value="0.00001">轻度（约1米，形状几乎不变）</option>
+            <option value="0.00005" selected>中度（约5米，推荐网页用）</option>
+            <option value="0.0001">重度（约10米，边界略平滑）</option>
+          </select>
+        </div>
+        <div class="opt-row">
+          <label>坐标精度：</label>
+          <select id="optPrecision">
+            <option value="4">4位小数（约10米精度）</option>
+            <option value="5" selected>5位小数（约1米精度）</option>
+            <option value="6">6位小数（约0.1米精度）</option>
+          </select>
+        </div>
+        <div class="opt-row">
+          <input type="checkbox" id="optSlimProps" checked>
+          <label for="optSlimProps">精简属性字段（只保留颜色相关，删除原始dbf属性）</label>
+        </div>
+        <div class="opt-row">
+          <input type="checkbox" id="optCompact" checked>
+          <label for="optCompact">紧凑JSON（去掉空格缩进）</label>
+        </div>
+      </div>
+
+      <div class="action-wrap" id="actionWrap">
+        <button class="convert-btn" id="convertBtn" style="display:none">开始转换</button>
+        <div class="progress-bar" id="progressBar">
+          <div class="fill" id="progressFill"></div>
+        </div>
+        <div class="log-area" id="logArea"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const fileList = document.getElementById('fileList');
+const fileItems = document.getElementById('fileItems');
+const fileListTitle = document.getElementById('fileListTitle');
+const fileCount = document.getElementById('fileCount');
+const convertBtn = document.getElementById('convertBtn');
+const progressBar = document.getElementById('progressBar');
+const progressFill = document.getElementById('progressFill');
+const logArea = document.getElementById('logArea');
+
+let groups = {}; // { baseName: { shp: File, dbf: File, prj: File, ... } }
+
+// 生成区分色
+function makeColors(n) {
+  const colors = [];
+  for (let i = 0; i < n; i++) {
+    const h = i / n;
+    const r = Math.round(255 * (0.7 + 0.3 * Math.cos(2 * Math.PI * h)));
+    const g = Math.round(255 * (0.7 + 0.3 * Math.cos(2 * Math.PI * h - 2.094)));
+    const b = Math.round(255 * (0.7 + 0.3 * Math.cos(2 * Math.PI * h + 2.094)));
+    colors.push(`rgb(${r},${g},${b})`);
+  }
+  return colors;
+}
+
+function addFiles(fileListObj) {
+  const files = Array.from(fileListObj);
+  files.forEach(f => {
+    const dotIdx = f.name.lastIndexOf('.');
+    if (dotIdx < 0) return;
+    const ext = f.name.substring(dotIdx).toLowerCase();
+    const baseName = f.name.substring(0, dotIdx);
+    // 跳过 lock 等临时文件
+    if (ext === '.lock' || f.name.includes('.sr.lock') || f.name.includes('.ed.lock')) return;
+    if (!groups[baseName]) groups[baseName] = {};
+    groups[baseName][ext] = f;
+  });
+  renderList();
+}
+
+function renderList() {
+  // 列出有 .shp / .kml / .csv / .txt 的图层
+  const bases = Object.keys(groups).filter(b => groups[b]['.shp'] || groups[b]['.kml'] || groups[b]['.csv'] || groups[b]['.txt']);
+  if (bases.length === 0) {
+    convertBtn.style.display = 'none';
+    fileCount.textContent = '';
+    fileItems.innerHTML = '<div class="empty-tip">还没有选择文件，点击上方区域选择</div>';
+    return;
+  }
+  convertBtn.style.display = 'block';
+  fileCount.textContent = bases.length + ' 个图层';
+  fileItems.innerHTML = '';
+  const colors = makeColors(bases.length);
+  bases.forEach((base, i) => {
+    const hasShp = groups[base]['.shp'];
+    const hasKml = groups[base]['.kml'];
+    const hasCsv = groups[base]['.csv'] || groups[base]['.txt'];
+    let tag = '';
+    if (!hasShp && hasKml) tag = ' (KML)';
+    if (!hasShp && !hasKml && hasCsv) tag = ' (点数据)';
+    const item = document.createElement('div');
+    item.className = 'file-item';
+    item.innerHTML = `
+      <span class="color-dot" style="background:${colors[i]}"></span>
+      <span class="file-name" title="${base}">${base}${tag}</span>
+      <span class="file-status status-pending" data-base="${base}">待转换</span>
+    `;
+    fileItems.appendChild(item);
+  });
+}
+
+function log(msg, cls = '') {
+  logArea.style.display = 'block';
+  const p = document.createElement('p');
+  if (cls) p.className = cls;
+  p.textContent = msg;
+  logArea.appendChild(p);
+  logArea.scrollTop = logArea.scrollHeight;
+}
+
+// 读取 ArrayBuffer
+function readBuf(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.onerror = reject;
+    fr.readAsArrayBuffer(file);
+  });
+}
+
+// 读取文本
+function readText(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.onerror = reject;
+    fr.readAsText(file);
+  });
+}
+
+// 下载文件
+function download(content, filename, mime) {
+  const blob = new Blob([content], { type: mime || 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// KML 转 GeoJSON
+function kmlToGeojson(xmlText) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlText, 'text/xml');
+  const features = [];
+
+  const placemarks = doc.getElementsByTagName('Placemark');
+  for (let pm of placemarks) {
+    const name = getTagText(pm, 'Name') || getTagText(pm, 'name') || '';
+    const desc = getTagText(pm, 'Description') || getTagText(pm, 'description') || '';
+
+    // 检查 Point
+    const pts = pm.getElementsByTagName('Point');
+    for (let pt of pts) {
+      const coords = getTagText(pt, 'coordinates').trim().split(',').map(Number);
+      features.push({
+        type: 'Feature',
+        properties: { name, description: desc },
+        geometry: { type: 'Point', coordinates: [coords[0], coords[1]] }
+      });
+    }
+
+    // 检查 LineString
+    const lines = pm.getElementsByTagName('LineString');
+    for (let line of lines) {
+      const coords = parseKmlCoords(getTagText(line, 'coordinates'));
+      features.push({
+        type: 'Feature',
+        properties: { name, description: desc },
+        geometry: { type: 'LineString', coordinates: coords }
+      });
+    }
+
+    // 检查 Polygon
+    const polys = pm.getElementsByTagName('Polygon');
+    for (let poly of polys) {
+      const outer = poly.getElementsByTagName('outerBoundaryIs')[0];
+      if (!outer) continue;
+      const ring = outer.getElementsByTagName('LinearRing')[0];
+      if (!ring) continue;
+      const coords = [parseKmlCoords(getTagText(ring, 'coordinates'))];
+      // 内部环
+      const inners = poly.getElementsByTagName('innerBoundaryIs');
+      for (let inner of inners) {
+        const iring = inner.getElementsByTagName('LinearRing')[0];
+        if (iring) coords.push(parseKmlCoords(getTagText(iring, 'coordinates')));
+      }
+      features.push({
+        type: 'Feature',
+        properties: { name, description: desc },
+        geometry: { type: 'Polygon', coordinates: coords }
+      });
+    }
+  }
+
+  return { type: 'FeatureCollection', features };
+}
+
+function getTagText(parent, tagName) {
+  const el = parent.getElementsByTagName(tagName)[0];
+  return el ? el.textContent : '';
+}
+
+function parseKmlCoords(str) {
+  return str.trim().split(/\s+/).map(pt => {
+    const parts = pt.split(',').map(Number);
+    return [parts[0], parts[1]];
+  });
+}
+
+// CSV/TXT 转 GeoJSON（点）
+function csvToGeojson(text) {
+  // 自动检测分隔符
+  const firstLine = text.split(/\r?\n/)[0];
+  const delim = firstLine.includes('\t') ? '\t' : (firstLine.includes(',') ? ',' : ';');
+  const rows = text.trim().split(/\r?\n/).map(r => r.split(delim));
+  const headers = rows[0].map(h => h.trim().toLowerCase());
+
+  const crsMode = document.getElementById('csvCrs').value;
+
+  // 找坐标列
+  let lonIdx = -1, latIdx = -1;
+  if (crsMode === 'wgs84') {
+    const lonKeys = ['lon', 'lng', 'longitude', 'x', '经度', '东'];
+    const latKeys = ['lat', 'latitude', 'y', '纬度', '北'];
+    headers.forEach((h, i) => {
+      if (lonIdx < 0 && lonKeys.some(k => h.includes(k))) lonIdx = i;
+      if (latIdx < 0 && latKeys.some(k => h.includes(k))) latIdx = i;
+    });
+  } else {
+    // 高斯投影模式
+    const northKeys = ['y', '北坐标', 'northing'];
+    const eastKeys = ['x', '东坐标', 'easting'];
+    headers.forEach((h, i) => {
+      if (latIdx < 0 && northKeys.some(k => h.includes(k))) latIdx = i;
+      if (lonIdx < 0 && eastKeys.some(k => h.includes(k))) lonIdx = i;
+    });
+  }
+
+  // 从坐标值自动识别带号（东坐标开头两位=带号）
+  function detectZone(eastFull) {
+    const s = String(Math.round(eastFull));
+    // 8位数：前两位是带号
+    if (s.length === 8) return parseInt(s.substring(0, 2));
+    // 6-7位数不带带号，默认36
+    return 36;
+  }
+
+  function gaussToWgs84(north, eastFull, zone) {
+    const east = eastFull - zone * 1000000;
+    const cm = zone * 3; // 3度带中央经线
+    proj4.defs('CSV_SRC', `+proj=tmerc +lat_0=0 +lon_0=${cm} +k=1 +x_0=500000 +y_0=0 +ellps=GRS80 +units=m +no_defs`);
+    return proj4('CSV_SRC', 'WGS84', [east, north]);
+  }
+
+  if (lonIdx < 0 || latIdx < 0) {
+    // 单列坐标格式：北;东
+    const coordKeys = ['坐标', 'coord', 'coordinates'];
+    let coordIdx = -1;
+    headers.forEach((h, i) => {
+      if (coordKeys.some(k => h.includes(k))) coordIdx = i;
+    });
+    if (coordIdx < 0) throw new Error('找不到坐标列（需包含 lon/lat/x/y/经度/纬度/坐标 等列名）');
+
+    const features = [];
+    for (let i = 1; i < rows.length; i++) {
+      const coordStr = rows[i][coordIdx].trim();
+      if (!coordStr) continue;
+      const parts = coordStr.split(/[;，,]/).map(Number);
+      if (parts.length !== 2 || isNaN(parts[0]) || isNaN(parts[1])) continue;
+      let lon, lat;
+      if (crsMode === 'wgs84') {
+        lon = parts[0]; lat = parts[1];
+      } else {
+        const north = parts[0];
+        const eastFull = parts[1];
+        const zone = detectZone(eastFull);
+        [lon, lat] = gaussToWgs84(north, eastFull, zone);
+      }
+      const props = {};
+      headers.forEach((h, j) => { if (j !== coordIdx) props[h] = rows[i][j]; });
+      features.push({
+        type: 'Feature',
+        properties: props,
+        geometry: { type: 'Point', coordinates: [lon, lat] }
+      });
+    }
+    return { type: 'FeatureCollection', features };
+  }
+
+  // 两列模式
+  const features = [];
+  for (let i = 1; i < rows.length; i++) {
+    if (!rows[i][lonIdx] || !rows[i][latIdx]) continue;
+    let lon = parseFloat(rows[i][lonIdx]);
+    let lat = parseFloat(rows[i][latIdx]);
+    if (isNaN(lon) || isNaN(lat)) continue;
+
+    if (crsMode === 'gauss') {
+      const north = lat;
+      const eastFull = lon;
+      const zone = detectZone(eastFull);
+      [lon, lat] = gaussToWgs84(north, eastFull, zone);
+    }
+
+    const props = {};
+    headers.forEach((h, j) => { if (j !== lonIdx && j !== latIdx) props[h] = rows[i][j]; });
+    features.push({
+      type: 'Feature',
+      properties: props,
+      geometry: { type: 'Point', coordinates: [lon, lat] }
+    });
+  }
+  return { type: 'FeatureCollection', features };
+}
+
+// ESRI WKT 转 proj4 字符串（支持常见高斯-克吕格/横轴墨卡托/Albers等）
+function wktToProj4(wkt) {
+  const getParam = (name) => {
+    const m = wkt.match(new RegExp('PARAMETER\\["' + name + '",([\\d.\\-]+)\\]'));
+    return m ? parseFloat(m[1]) : null;
+  };
+  const getSpheroid = () => {
+    const m = wkt.match(/SPHEROID\["([^"]+)",([\d.]+),([\d.]+)\]/);
+    return m ? { name: m[1], a: parseFloat(m[2]), rf: parseFloat(m[3]) } : null;
+  };
+
+  const isProjected = wkt.startsWith('PROJCS');
+  const projMatch = wkt.match(/PROJECTION\["([^"]+)"\]/);
+  const projName = projMatch ? projMatch[1] : '';
+
+  if (!isProjected) {
+    // 地理坐标系
+    return '+proj=longlat +datum=WGS84 +no_defs';
+  }
+
+  const sp = getSpheroid();
+  const cm = getParam('Central_Meridian');
+  const fe = getParam('False_Easting');
+  const fn = getParam('False_Northing');
+  const lat0 = getParam('Latitude_Of_Origin');
+  const k = getParam('Scale_Factor') || 1;
+  const lat1 = getParam('Standard_Parallel_1');
+  const lat2 = getParam('Standard_Parallel_2');
+
+  // 椭球：CGCS2000/WGS84/GRS80都用GRS80
+  const ellps = (sp && /CGCS|WGS|GRS80/i.test(sp.name)) ? 'GRS80' : (sp ? '' : 'GRS80');
+
+  let parts = [];
+  if (/Gauss|Transverse_Mercator|Mercator/i.test(projName) && !/Albers/i.test(projName)) {
+    parts.push('+proj=tmerc');
+    if (lat0 !== null) parts.push(`+lat_0=${lat0}`);
+    if (cm !== null) parts.push(`+lon_0=${cm}`);
+    parts.push(`+k=${k}`);
+    parts.push(`+x_0=${fe !== null ? fe : 0}`);
+    parts.push(`+y_0=${fn !== null ? fn : 0}`);
+    if (ellps) parts.push(`+ellps=${ellps}`);
+    parts.push('+units=m +no_defs');
+  } else if (/Albers/i.test(projName)) {
+    parts.push('+proj=aea');
+    if (lat1 !== null) parts.push(`+lat_1=${lat1}`);
+    if (lat2 !== null) parts.push(`+lat_2=${lat2}`);
+    if (lat0 !== null) parts.push(`+lat_0=${lat0}`);
+    if (cm !== null) parts.push(`+lon_0=${cm}`);
+    parts.push(`+x_0=${fe !== null ? fe : 0}`);
+    parts.push(`+y_0=${fn !== null ? fn : 0}`);
+    if (ellps) parts.push(`+ellps=${ellps}`);
+    parts.push('+units=m +no_defs');
+  } else {
+    throw new Error('暂不支持的投影类型: ' + projName);
+  }
+  return parts.join(' ');
+}
+
+async function convertOne(baseName, files, colorIdx, total) {
+  const statusEl = document.querySelector(`[data-base="${baseName}"]`);
+  try {
+    statusEl.className = 'file-status status-pending';
+    statusEl.textContent = '读取中...';
+
+    let geojson;
+    if (files['.kml']) {
+      // KML 直接转 GeoJSON（KML本身就是WGS84）
+      const kmlText = await readText(files['.kml']);
+      geojson = kmlToGeojson(kmlText);
+    } else if (files['.csv'] || files['.txt']) {
+      // CSV/TXT 转点 GeoJSON（本身就是WGS84经纬度）
+      const txt = files['.csv'] || files['.txt'];
+      const csvText = await readText(txt);
+      geojson = csvToGeojson(csvText);
+    } else {
+      // SHP 流程
+      const shpBuf = await readBuf(files['.shp']);
+      let dbfBuf = null;
+      if (files['.dbf']) dbfBuf = await readBuf(files['.dbf']);
+
+      if (dbfBuf) {
+        geojson = await shapefile.read(shpBuf, dbfBuf);
+      } else {
+        geojson = await shapefile.read(shpBuf);
+      }
+    }
+
+    // 读取 prj 做坐标转换
+    if (document.getElementById('optWgs84').checked && files['.prj']) {
+      const prjText = await readText(files['.prj']);
+      try {
+        // 把ESRI WKT解析成proj4字符串
+        const proj4str = wktToProj4(prjText);
+        proj4.defs('SRC', proj4str);
+        // 转换每个 geometry 的坐标
+        geojson.features.forEach(feat => {
+          transformCoords(feat.geometry);
+        });
+        function transformCoords(geom) {
+          if (!geom || !geom.coordinates) return;
+          if (geom.type === 'Point') {
+            geom.coordinates = proj4('SRC', 'WGS84', geom.coordinates);
+          } else if (geom.type === 'LineString' || geom.type === 'MultiPoint') {
+            geom.coordinates = geom.coordinates.map(c => proj4('SRC', 'WGS84', c));
+          } else if (geom.type === 'Polygon' || geom.type === 'MultiLineString') {
+            geom.coordinates = geom.coordinates.map(ring => ring.map(c => proj4('SRC', 'WGS84', c)));
+          } else if (geom.type === 'MultiPolygon') {
+            geom.coordinates = geom.coordinates.map(poly => poly.map(ring => ring.map(c => proj4('SRC', 'WGS84', c))));
+          }
+        }
+      } catch (e) {
+        log(`  [${baseName}] 坐标转换失败，保留原始坐标: ${e.message}`, 'log-err');
+      }
+    }
+
+    // 统一几何类型：Polygon→MultiPolygon, LineString→MultiLineString, Point→MultiPoint
+    // 避免QGIS加载时因混合几何类型自动拆成文件夹容器
+    geojson.features.forEach(feat => {
+      const g = feat.geometry;
+      if (!g) return;
+      if (g.type === 'Polygon') {
+        g.coordinates = [g.coordinates];
+        g.type = 'MultiPolygon';
+      } else if (g.type === 'LineString') {
+        g.coordinates = [g.coordinates];
+        g.type = 'MultiLineString';
+      } else if (g.type === 'Point') {
+        g.coordinates = [g.coordinates];
+        g.type = 'MultiPoint';
+      }
+    });
+
+    // 加颜色属性
+    if (document.getElementById('optColor').checked) {
+      const colors = makeColors(total);
+      const fill = colors[colorIdx];
+      geojson.features.forEach(feat => {
+        feat.properties = feat.properties || {};
+        feat.properties['fill_color'] = fill;
+        feat.properties['stroke_color'] = fill;
+        feat.properties['fill_opacity'] = 0.6;
+        feat.properties['layer_name'] = baseName;
+      });
+    }
+
+    // 压缩输出（可选）
+    let jsonStr;
+    if (document.getElementById('optCompress').checked) {
+      const precision = parseInt(document.getElementById('optPrecision').value);
+      const slimProps = document.getElementById('optSlimProps').checked;
+      const compact = document.getElementById('optCompact').checked;
+      const doSimplify = document.getElementById('optSimplify').checked;
+
+      // 几何简化（用turf.simplify，在坐标精度处理之前做）
+      if (doSimplify) {
+        const tolerance = parseFloat(document.getElementById('optTolerance').value);
+        geojson = turf.simplify(geojson, { tolerance: tolerance, highQuality: true, mutate: true });
+      }
+
+      geojson.features.forEach(feat => {
+        // 坐标精度
+        const g = feat.geometry;
+        if (g && g.coordinates) {
+          const roundCoords = (c) => {
+            if (typeof c[0] === 'number') return [+c[0].toFixed(precision), +c[1].toFixed(precision)];
+            return c.map(roundCoords);
+          };
+          g.coordinates = roundCoords(g.coordinates);
+        }
+        // 精简属性
+        if (slimProps) {
+          const p = feat.properties || {};
+          feat.properties = {
+            fill_color: p.fill_color || '',
+            stroke_color: p.stroke_color || '',
+            fill_opacity: p.fill_opacity || 0.6,
+            layer_name: p.layer_name || baseName
+          };
+        }
+      });
+      jsonStr = JSON.stringify(geojson, null, compact ? 0 : 2);
+    } else {
+      jsonStr = JSON.stringify(geojson, null, 2);
+    }
+
+    // 下载
+    const outName = baseName + '.geojson';
+    download(jsonStr, outName, 'application/geo+json');
+
+    statusEl.className = 'file-status status-ok';
+    statusEl.textContent = '已转换';
+    log(`[${colorIdx+1}/${total}] OK: ${outName}`, 'log-ok');
+  } catch (e) {
+    statusEl.className = 'file-status status-err';
+    statusEl.textContent = '失败';
+    log(`[${colorIdx+1}/${total}] FAIL: ${baseName} -> ${e.message}`, 'log-err');
+  }
+}
+
+dropZone.addEventListener('click', () => fileInput.click());
+
+// 压缩面板展开/收起
+document.getElementById('optCompress').addEventListener('change', function() {
+  document.getElementById('compressPanel').style.display = this.checked ? 'block' : 'none';
+});
+// 简化程度展开/收起
+document.getElementById('optSimplify').addEventListener('change', function() {
+  document.getElementById('toleranceRow').style.display = this.checked ? 'flex' : 'none';
+});
+// CSV坐标模式切换
+document.getElementById('csvCrs').addEventListener('change', function() {
+  document.getElementById('zoneWrap').style.display = this.value === 'gauss' ? 'inline' : 'none';
+});
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  addFiles(e.dataTransfer.files);
+});
+fileInput.addEventListener('change', e => addFiles(e.target.files));
+
+convertBtn.addEventListener('click', async () => {
+  const bases = Object.keys(groups).filter(b => groups[b]['.shp']);
+  if (bases.length === 0) return;
+  convertBtn.disabled = true;
+  progressBar.style.display = 'block';
+  logArea.innerHTML = '';
+  log(`开始转换 ${bases.length} 个图层...`, 'log-info');
+
+  for (let i = 0; i < bases.length; i++) {
+    await convertOne(bases[i], groups[bases[i]], i, bases.length);
+    progressFill.style.width = ((i + 1) / bases.length * 100) + '%';
+  }
+
+  log(`全部完成！共转换 ${bases.length} 个 GeoJSON 文件`, 'log-ok');
+  convertBtn.disabled = false;
+  convertBtn.textContent = '再次转换';
+});
+</script>
+
+</body>
+</html>
